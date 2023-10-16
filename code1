@@ -1,0 +1,91 @@
+import gpytorch
+import torch
+from gpytorch.means import ConstantMean
+from gpytorch.kernels import RBFKernel, ScaleKernel
+from gpytorch.distributions import MultivariateNormal
+import matplotlib.pyplot as plt
+
+# Define the function f(x)
+def f(x):
+    return (torch.sin(10 * torch.pi * x)) / (2 * x) + (x - 1) ** 4
+
+# Set the range for x
+x_min = 0.5
+x_max = 2.5
+
+# Number of training observations
+n_train = 500
+
+# Generate the training dataset
+train_x = torch.linspace(x_min, x_max, n_train).view(-1, 1)  # Training data
+train_y = f(train_x) + torch.randn_like(train_x).view(-1) * 0.01  # True function values with noise (make sure to view it as 1D)
+
+# Create a likelihood
+likelihood = gpytorch.likelihoods.GaussianLikelihood()
+
+# Create the GP regression model
+class GPRegressionModel(gpytorch.models.ExactGP):
+    def __init__(self, train_x, train_y, likelihood):
+        super(GPRegressionModel, self).__init__(train_x, train_y, likelihood)
+        self.mean_module = ConstantMean()
+        self.base_covar_module = ScaleKernel(RBFKernel(ard_num_dims=1))  # Use ARD for separate lengthscales
+        self.covar_module = gpytorch.kernels.InducingPointKernel(
+            self.base_covar_module,
+            inducing_points=train_x[:500, :].clone(),
+            likelihood=likelihood
+            #grid_size=50  # Number of inducing points
+        )
+
+    def forward(self, x):
+        mean_x = self.mean_module(x)
+        covar_x = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+
+# Initialize the model
+model = GPRegressionModel(train_x, train_y, likelihood)
+
+# Set the model to training mode
+model.train()
+
+# Define the optimizer
+optimizer = torch.optim.Adam(model.parameters(), lr=0.05)  # Adjusted learning rate
+
+# Define the number of iterations for hyperparameter optimization
+d = train_x.size(0)
+max_iter = min(250, int(50 * torch.log(1 + d)))
+
+# Train the model with a specified number of iterations
+for i in range(max_iter):
+    optimizer.zero_grad()
+    output = model(train_x)
+    loss = -model.likelihood(output, train_y).log_prob().mean()
+    loss.backward()
+    optimizer.step()
+
+# Set the model to evaluation mode
+model.eval()
+likelihood.eval()
+
+# Generate test points
+n_test = 1000
+test_x = torch.linspace(x_min, x_max, n_test).view(-1, 1)
+
+# Make predictions with the model
+with torch.no_grad():
+    observed_pred = likelihood(model(test_x))
+
+# Extract the predicted mean and standard deviation
+mean = observed_pred.mean
+stddev = observed_pred.stddev
+
+# Plot the function f(x), training data, GP predictions, and uncertainty
+plt.figure(figsize=(10, 6))
+plt.plot(test_x, f(test_x), 'g', label='f(x)')  # True function f(x)
+plt.scatter(train_x, train_y, c='r', marker='x', label='Training Data', s=20)
+plt.plot(test_x, mean, 'b', label='GP Mean Prediction')
+plt.fill_between(test_x.view(-1).numpy(), (mean - 1.96 * stddev).numpy(), (mean + 1.96 * stddev).numpy(), alpha=0.2, color='blue', label='95% Confidence Interval')
+plt.xlabel('x')
+plt.ylabel('f(x)')
+plt.title('SGPR Model with GPyTorch')
+plt.legend(loc='best')
+plt.show()
